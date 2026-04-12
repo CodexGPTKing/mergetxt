@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>TXT Merger • 300+ Files • iPhone Safari</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+        :root { --bg: #f8f9fa; --text: #111; --accent: #0066ff; }
+        @media (prefers-color-scheme: dark) { :root { --bg: #111; --text: #f8f9fa; --accent: #4da3ff; } }
+        body { margin:0; padding:20px; font-family:'Inter',system-ui,sans-serif; background:var(--bg); color:var(--text); line-height:1.5; }
+        .container { max-width:640px; margin:40px auto; background:white; border-radius:20px; box-shadow:0 10px 30px rgba(0,0,0,0.1); padding:30px; }
+        @media (prefers-color-scheme: dark) { .container { background:#222; } }
+        h1 { font-size:28px; margin:0 0 10px; text-align:center; }
+        p { text-align:center; color:#666; margin:0 0 30px; font-size:15px; }
+        .btn { display:block; width:100%; padding:16px; font-size:18px; font-weight:600; border-radius:12px; text-align:center; text-decoration:none; margin-bottom:15px; }
+        .select-btn { background:var(--accent); color:white; }
+        .merge-btn { background:#28a745; color:white; opacity:0.5; pointer-events:none; }
+        .merge-btn.enabled { opacity:1; pointer-events:auto; }
+        .status { text-align:center; margin:20px 0; font-size:15px; min-height:24px; }
+        .progress-container { height:8px; background:#eee; border-radius:9999px; overflow:hidden; margin:20px 0; }
+        .progress-bar { height:100%; width:0%; background:var(--accent); transition:width 0.3s ease; }
+        .download-link { display:none; }
+        .info { font-size:13px; color:#666; text-align:center; margin-top:30px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📂 TXT Merger</h1>
+        <p>300+ files • Auto-sorts alphabetically by filename • 100% local in Safari</p>
+        
+        <a href="#" id="selectBtn" class="btn select-btn">Select TXT Files</a>
+        <input type="file" id="fileInput" multiple accept=".txt,text/plain" style="display:none;">
+        
+        <div id="status" class="status">No files selected yet</div>
+        
+        <div class="progress-container">
+            <div id="progressBar" class="progress-bar"></div>
+        </div>
+        
+        <a href="#" id="mergeBtn" class="btn merge-btn">Merge & Download TXT</a>
+        
+        <div id="result" class="info"></div>
+    </div>
+
+    <script>
+        const fileInput = document.getElementById('fileInput');
+        const selectBtn = document.getElementById('selectBtn');
+        const mergeBtn = document.getElementById('mergeBtn');
+        const statusEl = document.getElementById('status');
+        const progressBar = document.getElementById('progressBar');
+        const resultEl = document.getElementById('result');
+        
+        let selectedFiles = [];
+        
+        // Trigger hidden input
+        selectBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            fileInput.click();
+        });
+        
+        // Handle file selection + instant alpha sort
+        fileInput.addEventListener('change', (e) => {
+            selectedFiles = Array.from(e.target.files);
+            // Critical: alphabetical sort by filename
+            selectedFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+            
+            if (selectedFiles.length > 0) {
+                statusEl.textContent = `${selectedFiles.length} TXT files selected & sorted alphabetically`;
+                mergeBtn.classList.add('enabled');
+                mergeBtn.textContent = `Merge ${selectedFiles.length} Files → Download TXT`;
+            } else {
+                statusEl.textContent = 'No files selected';
+                mergeBtn.classList.remove('enabled');
+            }
+            progressBar.style.width = '0%';
+            resultEl.textContent = '';
+        });
+        
+        // Merge function – sequential read for memory safety on mobile
+        async function mergeFiles() {
+            if (selectedFiles.length === 0) return;
+            
+            statusEl.textContent = 'Reading files... (this may take a moment on iPhone)';
+            progressBar.style.width = '0%';
+            resultEl.textContent = '';
+            
+            let mergedContent = '';
+            let processed = 0;
+            
+            for (const file of selectedFiles) {
+                const content = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.onerror = reject;
+                    reader.readAsText(file, 'UTF-8');
+                });
+                
+                // Add clear separator with filename (makes merged file usable)
+                mergedContent += `=== ${file.name} ===\n${content}\n\n`;
+                
+                processed++;
+                const percent = Math.round((processed / selectedFiles.length) * 100);
+                progressBar.style.width = `${percent}%`;
+                statusEl.textContent = `Processed ${processed}/${selectedFiles.length} files...`;
+            }
+            
+            // Create downloadable TXT Blob
+            const blob = new Blob([mergedContent], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `merged_${new Date().toISOString().slice(0,10)}.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            // Final success
+            statusEl.textContent = `✅ Success! ${selectedFiles.length} files merged & downloaded`;
+            progressBar.style.width = '100%';
+            resultEl.innerHTML = `File saved as <strong>merged_YYYY-MM-DD.txt</strong><br>Contains all files with clear filename separators.`;
+            mergeBtn.textContent = 'Done ✓ (select new files to repeat)';
+        }
+        
+        // Wire up merge button
+        mergeBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            if (mergeBtn.classList.contains('enabled')) {
+                mergeFiles();
+            }
+        });
+        
+        // Keyboard hint for power users
+        console.log('%c✅ TXT Merger ready for 300+ files on iPhone Safari. Auto-sorts by filename.', 'color:#0066ff;font-weight:600');
+    </script>
+</body>
+</html>
