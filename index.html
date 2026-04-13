@@ -29,8 +29,8 @@
         <h1>📂 TXT Merger</h1>
         <p>300+ files • Auto-sorts alphabetically by filename • Smart encoding support • 100% local in Safari</p>
         
-        <a href="#" id="selectBtn" class="btn select-btn">Select Text/HTML Files</a>
-        <input type="file" id="fileInput" multiple accept=".txt,.text,.log,.csv,.md,.json,.xml,.yaml,.yml,.htm,.html,text/plain,text/html,text/*,application/xhtml+xml" style="display:none;">
+        <a href="#" id="selectBtn" class="btn select-btn">Select Text-Based Files</a>
+        <input type="file" id="fileInput" multiple accept=".txt,.text,.log,.csv,.tsv,.md,.markdown,.json,.jsonl,.xml,.yaml,.yml,.ini,.cfg,.conf,.properties,.sql,.js,.ts,.css,.scss,.py,.java,.c,.cpp,.h,.hpp,.rb,.go,.rs,.php,.sh,.bat,.ps1,.rtf,.srt,.vtt,.htm,.html,.xhtml,.svg,.eml,text/plain,text/html,text/*,application/xhtml+xml,application/xml,application/json" style="display:none;">
         
         <div id="status" class="status">No files selected yet</div>
         
@@ -82,10 +82,23 @@
             'utf-16le',
             'utf-16be',
             'windows-1255', // Hebrew (common in old Windows exports)
-            'iso-8859-8',   // Hebrew legacy
+            'iso-8859-8',   // Hebrew legacy visual
+            'iso-8859-8-i', // Hebrew logical
+            'windows-1256', // Arabic
+            'windows-1251', // Cyrillic
+            'windows-1250', // Central European
+            'windows-1254', // Turkish
+            'windows-1253', // Greek
+            'shift_jis',
+            'euc-jp',
+            'gb18030',
+            'big5',
+            'euc-kr',
+            'windows-874',
             'windows-1252', // Western ANSI
             'iso-8859-1'
         ];
+        const textTypeAllowList = ['text/', 'application/xml', 'application/xhtml+xml', 'application/json'];
 
         function detectBomEncoding(bytes) {
             if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return 'utf-8';
@@ -94,26 +107,95 @@
             return null;
         }
 
-        function scoreDecodedText(text) {
+        function detectUtf16ByNullPattern(bytes) {
+            if (bytes.length < 8) return null;
+
+            const sampleLength = Math.min(bytes.length, 2048);
+            let evenNull = 0;
+            let oddNull = 0;
+            let inspectedPairs = 0;
+            for (let i = 0; i + 1 < sampleLength; i += 2) {
+                if (bytes[i] === 0x00) evenNull++;
+                if (bytes[i + 1] === 0x00) oddNull++;
+                inspectedPairs++;
+            }
+
+            if (inspectedPairs < 8) return null;
+            const evenRatio = evenNull / inspectedPairs;
+            const oddRatio = oddNull / inspectedPairs;
+
+            if (oddRatio > 0.35 && evenRatio < 0.1) return 'utf-16le';
+            if (evenRatio > 0.35 && oddRatio < 0.1) return 'utf-16be';
+            return null;
+        }
+
+        function maybeExtractDeclaredCharset(bytes) {
+            try {
+                const asciiHead = new TextDecoder('latin1', { fatal: false }).decode(bytes.slice(0, 4096)).toLowerCase();
+                const metaMatch = asciiHead.match(/charset\s*=\s*["']?\s*([a-z0-9._-]+)/i);
+                if (metaMatch && metaMatch[1]) {
+                    return metaMatch[1].trim();
+                }
+            } catch (error) {
+                // No-op; continue with heuristic detection.
+            }
+            return null;
+        }
+
+        function scoreDecodedText(text, bytes) {
             if (!text || text.length === 0) return Number.POSITIVE_INFINITY;
 
             let replacementCount = 0;
             let nullCount = 0;
             let controlCount = 0;
+            let hebrewCount = 0;
+            let latinCount = 0;
+            let cjkCount = 0;
+            let punctuationCount = 0;
+            let mojibakeHints = 0;
 
             for (let i = 0; i < text.length; i++) {
                 const code = text.charCodeAt(i);
                 if (code === 0xfffd) replacementCount++;
                 if (code === 0x0000) nullCount++;
                 if (code < 32 && code !== 9 && code !== 10 && code !== 13) controlCount++;
+                if (code >= 0x0590 && code <= 0x05ff) hebrewCount++;
+                else if ((code >= 0x0041 && code <= 0x007a) || (code >= 0x00c0 && code <= 0x024f)) latinCount++;
+                else if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3040 && code <= 0x30ff) || (code >= 0xac00 && code <= 0xd7af)) cjkCount++;
+                else if ((code >= 33 && code <= 47) || (code >= 58 && code <= 64) || (code >= 91 && code <= 96) || (code >= 123 && code <= 126)) punctuationCount++;
             }
 
-            return (replacementCount * 10) + (nullCount * 3) + controlCount;
+            if (/[ÃÐÑØÙœ¢£¤¥¦§¨©ª«¬®¯°±²³´µ¶·¸¹º»¼½¾¿]/.test(text)) mojibakeHints += 8;
+            if (/ðŸ/.test(text)) mojibakeHints += 8;
+
+            const density = text.length > 0 ? punctuationCount / text.length : 0;
+            const scriptSignal = Math.max(hebrewCount, latinCount, cjkCount);
+            const weakScriptPenalty = scriptSignal < 5 ? 3 : 0;
+            const punctuationPenalty = density > 0.45 ? 8 : 0;
+            const binaryPenalty = bytes.length > 0 && text.length > bytes.length * 1.8 ? 6 : 0;
+
+            return (replacementCount * 14) + (nullCount * 5) + (controlCount * 2) + weakScriptPenalty + punctuationPenalty + mojibakeHints + binaryPenalty;
+        }
+
+        function isLikelyBinary(bytes) {
+            if (!bytes || bytes.length === 0) return false;
+            const sampleLength = Math.min(bytes.length, 8192);
+            let suspicious = 0;
+
+            for (let i = 0; i < sampleLength; i++) {
+                const b = bytes[i];
+                if (b === 0) suspicious += 2;
+                else if ((b < 7 || (b > 13 && b < 32)) && b !== 9 && b !== 10 && b !== 13) suspicious++;
+            }
+
+            return (suspicious / sampleLength) > 0.25;
         }
 
         function decodeBytesWithBestEncoding(arrayBuffer) {
             const bytes = new Uint8Array(arrayBuffer);
             const bomEncoding = detectBomEncoding(bytes);
+            const inferredUtf16 = detectUtf16ByNullPattern(bytes);
+            const declaredCharset = maybeExtractDeclaredCharset(bytes);
 
             if (bomEncoding) {
                 return {
@@ -122,11 +204,27 @@
                 };
             }
 
+            if (inferredUtf16) {
+                return {
+                    text: new TextDecoder(inferredUtf16, { fatal: false }).decode(bytes),
+                    encoding: `${inferredUtf16} (no BOM)`
+                };
+            }
+
+            if (declaredCharset) {
+                try {
+                    const decoded = new TextDecoder(declaredCharset, { fatal: false }).decode(bytes);
+                    return { text: decoded, encoding: `${declaredCharset} (declared)` };
+                } catch (error) {
+                    // Unsupported label in this browser; continue with candidates.
+                }
+            }
+
             let best = null;
             for (const encoding of decoderCandidates) {
                 try {
                     const decoded = new TextDecoder(encoding, { fatal: false }).decode(bytes);
-                    const score = scoreDecodedText(decoded);
+                    const score = scoreDecodedText(decoded, bytes);
                     if (!best || score < best.score) {
                         best = { text: decoded, encoding, score };
                         if (score === 0) break;
@@ -154,6 +252,17 @@
                 reader.readAsArrayBuffer(file);
             });
 
+            const bytes = new Uint8Array(arrayBuffer);
+            const mimeType = (file.type || '').toLowerCase();
+            const hasAllowedMime = textTypeAllowList.some((allowedType) => mimeType.startsWith(allowedType));
+
+            if (isLikelyBinary(bytes) && !hasAllowedMime) {
+                return {
+                    text: `[Skipped: ${file.name} appears to be binary / non-text content]`,
+                    encoding: 'skipped-binary'
+                };
+            }
+
             return decodeBytesWithBestEncoding(arrayBuffer);
         }
 
@@ -168,13 +277,20 @@
             const mergedParts = [];
             let processed = 0;
             const encodingUsage = new Map();
+            let skippedCount = 0;
             
             for (const file of selectedFiles) {
-                const { text: content, encoding } = await readFileAsTextWithFallback(file);
-                encodingUsage.set(encoding, (encodingUsage.get(encoding) || 0) + 1);
-                
-                // Add clear separator with filename (makes merged file usable)
-                mergedParts.push(`=== ${file.name} ===\n${content}\n\n`);
+                try {
+                    const { text: content, encoding } = await readFileAsTextWithFallback(file);
+                    encodingUsage.set(encoding, (encodingUsage.get(encoding) || 0) + 1);
+                    if (encoding === 'skipped-binary') skippedCount++;
+                    
+                    // Add clear separator with filename (makes merged file usable)
+                    mergedParts.push(`=== ${file.name} ===\n${content}\n\n`);
+                } catch (error) {
+                    mergedParts.push(`=== ${file.name} ===\n[Read failed: ${error?.message || 'unknown error'}]\n\n`);
+                    encodingUsage.set('failed-read', (encodingUsage.get('failed-read') || 0) + 1);
+                }
                 
                 processed++;
                 const percent = Math.round((processed / selectedFiles.length) * 100);
@@ -202,7 +318,8 @@
                 .sort((a, b) => b[1] - a[1])
                 .map(([encoding, count]) => `${encoding} (${count})`)
                 .join(', ');
-            resultEl.innerHTML = `File saved as <strong>merged_YYYY-MM-DD.txt</strong><br>Contains all files with clear filename separators.<br>Detected encodings: ${encodingSummary}.`;
+            const skippedSummary = skippedCount > 0 ? `<br><strong>Skipped binary files:</strong> ${skippedCount}` : '';
+            resultEl.innerHTML = `File saved as <strong>merged_YYYY-MM-DD.txt</strong><br>Contains all files with clear filename separators.<br>Detected encodings: ${encodingSummary}.${skippedSummary}`;
             mergeBtn.textContent = 'Done ✓ (select new files to repeat)';
         }
         
