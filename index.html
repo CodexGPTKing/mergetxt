@@ -27,10 +27,10 @@
 <body>
     <div class="container">
         <h1>📂 TXT Merger</h1>
-        <p>300+ files • Auto-sorts alphabetically by filename • 100% local in Safari</p>
+        <p>300+ files • Auto-sorts alphabetically by filename • Smart encoding support • 100% local in Safari</p>
         
-        <a href="#" id="selectBtn" class="btn select-btn">Select TXT Files</a>
-        <input type="file" id="fileInput" multiple accept=".txt,text/plain" style="display:none;">
+        <a href="#" id="selectBtn" class="btn select-btn">Select Text/HTML Files</a>
+        <input type="file" id="fileInput" multiple accept=".txt,.text,.log,.csv,.md,.json,.xml,.yaml,.yml,.htm,.html,text/plain,text/html,text/*,application/xhtml+xml" style="display:none;">
         
         <div id="status" class="status">No files selected yet</div>
         
@@ -66,9 +66,9 @@
             selectedFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
             
             if (selectedFiles.length > 0) {
-                statusEl.textContent = `${selectedFiles.length} TXT files selected & sorted alphabetically`;
+                statusEl.textContent = `${selectedFiles.length} files selected & sorted alphabetically`;
                 mergeBtn.classList.add('enabled');
-                mergeBtn.textContent = `Merge ${selectedFiles.length} Files → Download TXT`;
+                mergeBtn.textContent = `Merge ${selectedFiles.length} Files → Download`;
             } else {
                 statusEl.textContent = 'No files selected';
                 mergeBtn.classList.remove('enabled');
@@ -77,6 +77,86 @@
             resultEl.textContent = '';
         });
         
+        const decoderCandidates = [
+            'utf-8',
+            'utf-16le',
+            'utf-16be',
+            'windows-1255', // Hebrew (common in old Windows exports)
+            'iso-8859-8',   // Hebrew legacy
+            'windows-1252', // Western ANSI
+            'iso-8859-1'
+        ];
+
+        function detectBomEncoding(bytes) {
+            if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return 'utf-8';
+            if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) return 'utf-16le';
+            if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) return 'utf-16be';
+            return null;
+        }
+
+        function scoreDecodedText(text) {
+            if (!text || text.length === 0) return Number.POSITIVE_INFINITY;
+
+            let replacementCount = 0;
+            let nullCount = 0;
+            let controlCount = 0;
+
+            for (let i = 0; i < text.length; i++) {
+                const code = text.charCodeAt(i);
+                if (code === 0xfffd) replacementCount++;
+                if (code === 0x0000) nullCount++;
+                if (code < 32 && code !== 9 && code !== 10 && code !== 13) controlCount++;
+            }
+
+            return (replacementCount * 10) + (nullCount * 3) + controlCount;
+        }
+
+        function decodeBytesWithBestEncoding(arrayBuffer) {
+            const bytes = new Uint8Array(arrayBuffer);
+            const bomEncoding = detectBomEncoding(bytes);
+
+            if (bomEncoding) {
+                return {
+                    text: new TextDecoder(bomEncoding, { fatal: false }).decode(bytes),
+                    encoding: bomEncoding
+                };
+            }
+
+            let best = null;
+            for (const encoding of decoderCandidates) {
+                try {
+                    const decoded = new TextDecoder(encoding, { fatal: false }).decode(bytes);
+                    const score = scoreDecodedText(decoded);
+                    if (!best || score < best.score) {
+                        best = { text: decoded, encoding, score };
+                        if (score === 0) break;
+                    }
+                } catch (error) {
+                    // Ignore unsupported decoder labels in older browsers
+                }
+            }
+
+            if (best) {
+                return { text: best.text, encoding: best.encoding };
+            }
+
+            return {
+                text: new TextDecoder('utf-8', { fatal: false }).decode(bytes),
+                encoding: 'utf-8'
+            };
+        }
+
+        async function readFileAsTextWithFallback(file) {
+            const arrayBuffer = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target.result);
+                reader.onerror = reject;
+                reader.readAsArrayBuffer(file);
+            });
+
+            return decodeBytesWithBestEncoding(arrayBuffer);
+        }
+
         // Merge function – sequential read for memory safety on mobile
         async function mergeFiles() {
             if (selectedFiles.length === 0) return;
@@ -85,25 +165,24 @@
             progressBar.style.width = '0%';
             resultEl.textContent = '';
             
-            let mergedContent = '';
+            const mergedParts = [];
             let processed = 0;
+            const encodingUsage = new Map();
             
             for (const file of selectedFiles) {
-                const content = await new Promise((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onload = (e) => resolve(e.target.result);
-                    reader.onerror = reject;
-                    reader.readAsText(file, 'UTF-8');
-                });
+                const { text: content, encoding } = await readFileAsTextWithFallback(file);
+                encodingUsage.set(encoding, (encodingUsage.get(encoding) || 0) + 1);
                 
                 // Add clear separator with filename (makes merged file usable)
-                mergedContent += `=== ${file.name} ===\n${content}\n\n`;
+                mergedParts.push(`=== ${file.name} ===\n${content}\n\n`);
                 
                 processed++;
                 const percent = Math.round((processed / selectedFiles.length) * 100);
                 progressBar.style.width = `${percent}%`;
                 statusEl.textContent = `Processed ${processed}/${selectedFiles.length} files...`;
             }
+
+            const mergedContent = mergedParts.join('');
             
             // Create downloadable TXT Blob
             const blob = new Blob([mergedContent], { type: 'text/plain;charset=utf-8' });
@@ -119,7 +198,11 @@
             // Final success
             statusEl.textContent = `✅ Success! ${selectedFiles.length} files merged & downloaded`;
             progressBar.style.width = '100%';
-            resultEl.innerHTML = `File saved as <strong>merged_YYYY-MM-DD.txt</strong><br>Contains all files with clear filename separators.`;
+            const encodingSummary = Array.from(encodingUsage.entries())
+                .sort((a, b) => b[1] - a[1])
+                .map(([encoding, count]) => `${encoding} (${count})`)
+                .join(', ');
+            resultEl.innerHTML = `File saved as <strong>merged_YYYY-MM-DD.txt</strong><br>Contains all files with clear filename separators.<br>Detected encodings: ${encodingSummary}.`;
             mergeBtn.textContent = 'Done ✓ (select new files to repeat)';
         }
         
